@@ -16,10 +16,15 @@ import signal
 import os
 import sys
 
+
 class _TkWindow(tk.Tk):
     instance = None
     initialized = threading.Event()
     commands = Queue()
+
+    busy_count = 0
+    idle = threading.Event()
+    idle.set()
 
     def __init__(self):
         super().__init__()
@@ -37,12 +42,12 @@ class _TkWindow(tk.Tk):
         for event_type in EventType:
             self.bind(f"<{event_type.name}>", self.handle_event)
         self.bind(f"<<notify>>", self.process_commands)
-        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.protocol("WM_DELETE_WINDOW", self.close)
 
         self.canvas.focus_set()
         self.after_idle(self.process_commands)
 
-    def on_closing(self):
+    def close(self):
         self.closed = True
         self.quit()
         self.update()
@@ -52,12 +57,19 @@ class _TkWindow(tk.Tk):
             self.event_generate('<<notify>>', when='tail')
 
     def process_commands(self, *args):
-        while True:
-            try:
-                method, *args = _TkWindow.commands.get(False)
-                getattr(self, method)(*args)
-            except Empty:
-                break
+        _TkWindow.busy_count += 1
+        _TkWindow.idle.clear()
+        try:
+            while True:
+                try:
+                    method, *args = _TkWindow.commands.get(False)
+                    getattr(self, method)(*args)
+                except Empty:
+                    break
+        finally:
+            _TkWindow.busy_count -= 1
+            if _TkWindow.busy_count == 0:
+                _TkWindow.idle.set()
 
     def handle_event(self, tkevent):
         _GameThread.events.put(Event(tkevent))
@@ -68,6 +80,9 @@ class _TkWindow(tk.Tk):
     def clear(self):
         self.canvas.delete("all")
 
+    def icon(self, path):
+        self.tk.call('wm', 'iconphoto', self._w, self.get_image(path))
+
     def draw_image(self, path, x, y):
         self.canvas.create_image(x, y, anchor='nw', image=self.get_image(path))
 
@@ -76,15 +91,23 @@ class _TkWindow(tk.Tk):
         options.update(kwargs)
         getattr(self.canvas, f'create_{type}')(*args, **options)
 
-    def draw_text(self, text, x, y, size, kwargs):
+    def draw_text(self, text, x, y, font, size, bold, italic, kwargs):
         options = {'fill': 'white'}
         options.update(kwargs)
-        self.canvas.create_text(x, y, text=text, font=self.get_font(size), **options)
+        self.canvas.create_text(x, y, text=text, font=self.get_font(
+            font, size, bold, italic), **options)
 
-    def get_font(self, size):
-        name = f'font-{size}'
+    def get_font(self, family, size, bold, italic):
+        weight = 'normal'
+        if bold:
+            weight = 'bold'
+        slant = 'roman'
+        if italic:
+            slant = 'italic'
+        name = f'font-{family}-{size}-{weight}-{slant}'
         if name not in self.assets:
-            self.assets[name] = Font(size=size)
+            self.assets[name] = Font(
+                family=family, size=size, weight=weight, slant=slant)
         return self.assets[name]
 
     def get_image(self, path):
@@ -103,6 +126,7 @@ class _TkWindow(tk.Tk):
     def with_window(self, func, args):
         func(self, *args)
 
+
 def check_image_format(path):
     "Produce a warning message if the image format is not supported"
     ext = path[-4:].lower()
@@ -111,12 +135,14 @@ def check_image_format(path):
         print(f"{path}: Warning: image format {ext} is not supported and may not work properly on some platforms (Windows/Mac/Linux).")
         print(f"Please use one of: {supported}.")
 
+
 def check_audio_format(path):
     "Produce a warning message if the audio format is not supported"
     ext = path[-4:].lower()
     if ext != ".wav":
         print(f"{path}: Warning: audio format {ext} is not supported and may not work properly on some platforms (Windows/Mac/Linux).")
         print(f"Please use WAV.")
+
 
 def _audio_init():
     # shamelessly stolen from https://github.com/TaylorSMarks/playsound
@@ -127,7 +153,7 @@ def _audio_init():
     def _playsoundWin(sound):
         from ctypes import c_buffer, windll
         from random import random
-        from sys    import getfilesystemencoding
+        from sys import getfilesystemencoding
 
         def winCommand(*command):
             buf = c_buffer(255)
@@ -138,7 +164,7 @@ def _audio_init():
                 windll.winmm.mciGetErrorStringA(errorCode, errorBuffer, 254)
                 exceptionMessage = ('\n    Error ' + str(errorCode) + ' for command:'
                                     '\n        ' + command.decode() +
-                                    '\n    ' + errorBuffer.value.decode())
+                                    '\n    ' + errorBuffer.value.decode(getfilesystemencoding(), 'ignore'))
                 raise PlaysoundException(exceptionMessage)
             return buf.value
 
@@ -149,14 +175,14 @@ def _audio_init():
         winCommand('play', alias, 'from 0 to', durationInMS.decode())
 
     def _playsoundOSX(sound):
-        from AppKit     import NSSound
+        from AppKit import NSSound
         from Foundation import NSURL
 
         if '://' not in sound:
             if not sound.startswith('/'):
                 sound = os.getcwd() + '/' + sound
             sound = 'file://' + sound
-        url   = NSURL.URLWithString_(sound)
+        url = NSURL.URLWithString_(sound)
         nssound = NSSound.alloc().initWithContentsOfURL_byReference_(url, True)
         if not nssound:
             raise IOError('Unable to load sound named: ' + sound)
@@ -175,7 +201,8 @@ def _audio_init():
         if sound.startswith(('http://', 'https://')):
             playbin.props.uri = sound
         else:
-            playbin.props.uri = 'file://' + pathname2url(os.path.abspath(sound))
+            playbin.props.uri = 'file://' + \
+                pathname2url(os.path.abspath(sound))
 
         set_result = playbin.set_state(Gst.State.PLAYING)
         if set_result != Gst.StateChangeReturn.ASYNC:
@@ -184,6 +211,7 @@ def _audio_init():
 
         bus = playbin.get_bus()
         bus.add_signal_watch()
+
         def on_message(bus, message):
             if message.type in (Gst.MessageType.EOS, Gst.MessageType.ERROR):
                 playbin.set_state(Gst.State.NULL)
@@ -216,6 +244,7 @@ def _audio_init():
 
     return play_sound
 
+
 class _GameThread(threading.Thread):
     instance = None
     initialized = threading.Event()
@@ -232,7 +261,7 @@ class _GameThread(threading.Thread):
         except Exception as e:
             sys.excepthook(*sys.exc_info())
         finally:
-            self.send_command_to_tk('destroy', notify=True)
+            self.send_command_to_tk('close', notify=True)
 
     def notify_tk(self):
         self.wait_for_tk()
@@ -314,6 +343,21 @@ class _GameThread(threading.Thread):
         """Set the window title to `s`."""
         self.send_command_to_tk('title', s)
 
+    def icon(self, path):
+        """
+        Set the window icon to the image located at `path`.
+
+        Example:
+            ```
+            gamelib.icon('images/icon.gif')
+            ```
+
+        Note:
+            The only image formats that are supported accross all platforms (Windows/Mac/Linux)
+            are GIF and PPM/PGM/PBM.
+        """
+        self.send_command_to_tk('icon', path)
+
     def draw_begin(self):
         """
         Clear the window.
@@ -327,6 +371,7 @@ class _GameThread(threading.Thread):
             gamelib.draw_end()
             ```
         """
+        _TkWindow.idle.wait()
         self.send_command_to_tk('clear')
 
     def draw_image(self, path, x, y):
@@ -344,27 +389,39 @@ class _GameThread(threading.Thread):
         """
         self.send_command_to_tk('draw_image', path, x, y)
 
-    def draw_text(self, text, x, y, size=12, **options):
+    def draw_text(self, text, x, y, font=None, size=12, bold=False, italic=False, **options):
         """
-        Draw some `text` at coordinates `x, y` with the given `size`.
+        Draw some `text` at coordinates `x, y` with the given properties.
 
-        Some of the supported options are:
+        Args:
+            text: The text to draw.
+            x:    The screen coordinates for the text.
+            y:    The screen coordinates for the text.
+            font: Font family name (eg: `'Helvetica'`). **Note:** the only font guaranteed to be
+                  available in all systems is the default font. If the selected font is not found,
+                  the default font will be used instead.
+            size: Size of the text.
+            bold: Whether or not to use bold weight.
+            italic: Whether or not to use italic slant.
+
+        Some of the supported extra options are:
 
         * `fill`: Fill color. It can be named colors like `'red'`, `'white'`, etc,
           or a specific color in `'#rrggbb'` hexadecimal format.
         * `anchor`: Where to place the text relative to the given position.
-          It be any combination of `n` (North), `s` (South), `e`
+          It may be any combination of `n` (North), `s` (South), `e`
           (East), `w` (West) and `c` (center). Default is `c`.
 
         To see all supported options, see the documentation for
-        [`Tkinter.Canvas.create_text`](https://effbot.org/tkinterbook/canvas.htm#Tkinter.Canvas.create_text-method).
+        [`tkinter.Canvas.create_text`](https://anzeljg.github.io/rin2/book2/2405/docs/tkinter/create_text.html).
 
         Example:
             ```
             gamelib.draw_text('Hello world!', 10, 10, fill='red', anchor='nw')
             ```
         """
-        self.send_command_to_tk('draw_text', text, x, y, size, options)
+        self.send_command_to_tk('draw_text', text, x, y,
+                                font, size, bold, italic, options)
 
     def draw_arc(self, x1, y1, x2, y2, **options):
         """
@@ -372,7 +429,7 @@ class _GameThread(threading.Thread):
         `x2, y2`.
 
         To see all supported options, see the documentation for
-        [`Tkinter.Canvas.create_arc`](https://effbot.org/tkinterbook/canvas.htm#Tkinter.Canvas.create_arc-method).
+        [`tkinter.Canvas.create_arc`](https://anzeljg.github.io/rin2/book2/2405/docs/tkinter/create_arc.html).
 
         Example:
             ```
@@ -386,7 +443,7 @@ class _GameThread(threading.Thread):
         Draw a straight line between points `x1, y1` and `x2, y2`.
 
         To see all supported options, see the documentation for
-        [`Tkinter.Canvas.create_line`](https://effbot.org/tkinterbook/canvas.htm#Tkinter.Canvas.create_line-method).
+        [`tkinter.Canvas.create_line`](https://anzeljg.github.io/rin2/book2/2405/docs/tkinter/create_line.html).
 
         Example:
             ```
@@ -400,7 +457,7 @@ class _GameThread(threading.Thread):
         Draw an ellipse in the bounding box between points `x1, y1` and `x2, y2`.
 
         To see all supported options, see the documentation for
-        [`Tkinter.Canvas.create_oval`](https://effbot.org/tkinterbook/canvas.htm#Tkinter.Canvas.create_oval-method).
+        [`tkinter.Canvas.create_oval`](https://anzeljg.github.io/rin2/book2/2405/docs/tkinter/create_oval.html).
 
         Example:
             ```
@@ -416,7 +473,7 @@ class _GameThread(threading.Thread):
         joined with the first one with a segment.
 
         To see all supported options, see the documentation for
-        [`Tkinter.Canvas.create_polygon`](https://effbot.org/tkinterbook/canvas.htm#Tkinter.Canvas.create_polygon-method).
+        [`tkinter.Canvas.create_polygon`](https://anzeljg.github.io/rin2/book2/2405/docs/tkinter/create_polygon.html).
 
         Example:
             ```
@@ -430,7 +487,7 @@ class _GameThread(threading.Thread):
         Draw an rectangle in the bounding box between points `x1, y1` and `x2, y2`.
 
         To see all supported options, see the documentation for
-        [`Tkinter.Canvas.create_rectangle`](https://effbot.org/tkinterbook/canvas.htm#Tkinter.Canvas.create_rectangle-method).
+        [`tkinter.Canvas.create_rectangle`](https://anzeljg.github.io/rin2/book2/2405/docs/tkinter/create_rectangle.html).
 
         Example:
             ```
@@ -519,11 +576,13 @@ class _GameThread(threading.Thread):
         _GameThread._last_loop_time = time.time()
         return self.is_alive()
 
+
 _GameThread.instance = _GameThread()
 
 wait = _GameThread.instance.wait
 get_events = _GameThread.instance.get_events
 title = _GameThread.instance.title
+icon = _GameThread.instance.icon
 draw_begin = _GameThread.instance.draw_begin
 draw_image = _GameThread.instance.draw_image
 draw_text = _GameThread.instance.draw_text
@@ -540,12 +599,14 @@ is_alive = _GameThread.instance.is_alive
 loop = _GameThread.instance.loop
 play_sound = _audio_init()
 
+
 def _sigint_handler(sig, frame):
     w = _TkWindow.instance
     if w:
-        w.on_closing()
+        w.close()
     else:
         raise KeyboardInterrupt()
+
 
 def init(game_main, args=None):
     """
@@ -573,9 +634,11 @@ def init(game_main, args=None):
         _TkWindow.instance = None
         _GameThread.instance.join(1)
         if _GameThread.instance.is_alive():
-            print('Killing unresponsive game thread. Make sure to call get_events() or wait() periodically.')
+            print(
+                'Killing unresponsive game thread. Make sure to call get_events() or wait() periodically.')
             os._exit(1)
         os._exit(0)
+
 
 class EventType(Enum):
     "An enumeration of the different types of `Event`s supported by gamelib."
@@ -591,6 +654,7 @@ class EventType(Enum):
     ButtonRelease = 'ButtonRelease'
     "The user released a mouse button."
 
+
 class Event:
     """
     Represents an event generated by the user.
@@ -603,7 +667,7 @@ class Event:
         y: The current mouse vertical position, in pixels.
 
     This is actually a wrapper for the
-    [Tkinter Event class](https://effbot.org/tkinterbook/tkinter-events-and-bindings.htm#events).
+    [Tkinter Event class](https://anzeljg.github.io/rin2/book2/2405/docs/tkinter/event-handlers.html).
     Any of the `tk.Event` attributes can be accessed through this object.
 
     ## See also
@@ -615,13 +679,17 @@ class Event:
         self.tkevent = tkevent
 
     def __getattr__(self, k):
-        if k == 'type': return EventType[str(self.tkevent.type)]
-        if k == 'key': return self.tkevent.keysym
-        if k == 'mouse_button': return self.tkevent.num
+        if k == 'type':
+            return EventType[self.tkevent.type.name]
+        if k == 'key':
+            return self.tkevent.keysym
+        if k == 'mouse_button':
+            return self.tkevent.num
         return getattr(self.tkevent, k)
 
     def __repr__(self):
         return repr(self.tkevent)
+
 
 if __name__ == '__main__':
     def interactive_main(_locals):
