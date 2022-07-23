@@ -9,5 +9,6 @@ d = DERECHA
 s = DESCENDER
 g = GUARDAR
 c = CARGAR
+r = REINICIAR
 
 Escape = SALIR

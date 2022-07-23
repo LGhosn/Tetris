@@ -1,3 +1,4 @@
+from asyncio.windows_events import NULL
 import tetris
 import gamelib
 
@@ -54,7 +55,7 @@ def dibujar_siguiente_pieza(siguiente_pieza):
         y1, y2 = 155 + (y * (ANCHO_ALTO_CELDA - 15)), 153 + ((y + 1) * (ANCHO_ALTO_CELDA - 15))
         gamelib.draw_rectangle(x1, y1, x2, y2, fill='#C700FD')
 
-def mostrar_puntuaciones(nombre, puntuacion, puntos_historicos):
+def mostrar_puntuaciones(nombre, puntuacion, puntos_historicos, teclas):
     '''
     Dibuja la interfaz al terminar el juego
     '''
@@ -66,6 +67,8 @@ def mostrar_puntuaciones(nombre, puntuacion, puntos_historicos):
         gamelib.draw_rectangle(0, 350, 650, 450, fill='#F4D03F', outline='#34495E')
         gamelib.draw_text(f'{nombre} : {puntuacion} pts', 650 // 2, 400, size='18', fill='#28B463')
         gamelib.draw_text('- - - RANKING - - -', 650 // 2, 500, size='20', fill='pink')
+        gamelib.draw_text('"R" para volver a jugar',100, 20, size='10', fill='pink')
+        gamelib.draw_text('"Esc" para salir',100, 40, size='10', fill='pink')
         
         y = 560
         x = 325 // 2
@@ -78,3 +81,22 @@ def mostrar_puntuaciones(nombre, puntuacion, puntos_historicos):
                 y = 560
                 x = 487
         gamelib.draw_end()
+
+        for event in gamelib.get_events():
+            if not event:
+                break
+            if event.type == gamelib.EventType.KeyPress:
+                # Actualizar el juego, según la tecla presionada
+                tecla_presionada = teclas.get(event.key, None)
+                if not tecla_presionada:
+                    break
+                if tecla_presionada == 'REINICIAR':
+                    return True                    
+
+                if tecla_presionada == 'SALIR':
+                    return False
+
+
+
+def intefazGameOver(nombre, puntuacion, puntos_historicos, teclas):
+    return mostrar_puntuaciones(nombre, puntuacion, puntos_historicos, teclas)
